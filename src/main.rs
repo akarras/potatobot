@@ -41,7 +41,7 @@ fn check_is_phishing_link(msg: &str) -> bool {
         if let Some(domain) = cap.get(2) {
             let distance = levenshtein_rs::compute(domain.as_str(), "discord");
             println!("{}", distance);
-            if distance < 4 {
+            if distance < 4 && distance > 0 {
                 return true;
             } else {
                 // we have a URL, check if there's other suspicious words
@@ -167,5 +167,8 @@ mod tests {
 
         // example taken from real phishing attempt and slightly modified
         assert_eq!(check_is_phishing_link("@​everyone 🔥Airdrop Discord FREE NITRO from Steam — https://discorcla-app.com/redeem/nitro"), true);
+
+        // Valid discord url
+        assert_eq!(check_is_phishing_link("hello https://discord.com/test-url-blah i am here"), false);
     }
 }
