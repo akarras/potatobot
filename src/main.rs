@@ -98,7 +98,9 @@ async fn listener(
     data: &Data,
 ) -> Result<(), Error> {
     log::info!("event: {:?}", event);
-    if let Event::Message { new_message } = event { message(ctx, event, data, new_message).await? };
+    if let Event::Message { new_message } = event {
+        message(ctx, event, data, new_message).await?
+    };
 
     Ok(())
 }
@@ -162,6 +164,9 @@ mod tests {
         assert_eq!(check_is_phishing_link("@​everyone 🔥Airdrop Discord FREE NITRO from Steam — https://discorcla-app.com/redeem/nitro"), true);
 
         // Valid discord url
-        assert_eq!(check_is_phishing_link("hello https://discord.com/test-url-blah i am here"), false);
+        assert_eq!(
+            check_is_phishing_link("hello https://discord.com/test-url-blah i am here"),
+            false
+        );
     }
 }
