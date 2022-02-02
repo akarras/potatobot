@@ -1,9 +1,10 @@
 use lazy_static::lazy_static;
-use log::error;
+use log::{error, info, debug};
 use poise::serenity::model::id::{ChannelId, RoleId};
+use poise::serenity::model::interactions::message_component::ButtonStyle;
 use poise::serenity::utils::Color;
-use poise::serenity_prelude::Message;
-use poise::{serenity_prelude as serenity, Event};
+use poise::serenity_prelude::{InteractionResponseType, Message, CreateComponents, CreateEmbed};
+use poise::{serenity_prelude as serenity, Event, PrefixFrameworkOptions};
 use regex::Regex;
 use tokio::time::Duration;
 
@@ -15,9 +16,9 @@ lazy_static! {
 
     static ref SUSPICIOUS_TERMS: Regex = Regex::new(r#"(?i)free|(?i)nitro"#).unwrap();
 }
+
 type Data = PotatoData;
 type Error = Box<dyn std::error::Error + Send + Sync>;
-//type Context<'a> = poise::Context<'a, Data, Error>;
 
 /// Checks if the link looks like a phishing link. returns true if phishing link
 fn check_is_phishing_link(msg: &str) -> bool {
@@ -36,14 +37,13 @@ fn check_is_phishing_link(msg: &str) -> bool {
         println!("{:?}", cap);
         if let Some(domain) = cap.get(2) {
             let distance = levenshtein_rs::compute(domain.as_str(), "discord");
-            println!("{}", distance);
             if distance < 4 && distance > 0 {
                 return true;
             } else {
                 // we have a URL, check if there's other suspicious words
                 let terms = SUSPICIOUS_TERMS.find(msg);
-                println!("{:?}", terms);
-                if SUSPICIOUS_TERMS.find(msg).is_some() {
+                if terms.is_some() {
+                    debug!("suspicious terms {:?}", terms);
                     return true;
                 }
             }
@@ -61,32 +61,98 @@ async fn message(
 ) -> Result<(), Error> {
     if check_is_phishing_link(&msg.content) {
         msg.delete(ctx).await?;
-        let mod_channel = ChannelId(586464513356726298);
-        let _ = mod_channel
+        let mod_channel = ChannelId(dotenv::var("MOD_CHANNEL")?.parse()?);
+        let mod_tatoe_role = dotenv::var("MOD_ROLE")?.parse()?;
+        let muted_role = RoleId(dotenv::var("MUTED_ROLE")?.parse()?);
+        let mut member = if let Some(guild) = msg.guild(ctx) {
+            let mut member = guild.member(ctx, msg.author.id).await?;
+            member.add_role(ctx, muted_role).await?;
+            info!("muted user {}", msg.author.name);
+            member
+        } else {
+            error!("Failed to mute user");
+            return Ok(());
+        };
+
+        let mod_message = mod_channel
             .send_message(ctx, |warn_msg| {
-                let mod_tatoe_role = 443068255511248896;
                 warn_msg
-                    .content("<@&443068255511248896>")
+                    .content(format!("<@&{}>", mod_tatoe_role))
                     .embed(|e| {
                         e.color(Color::RED)
                             .title("Potential phishing")
                             .description(format!(
-                                "<@{}> sent a suspicious message `{}`",
+                                "<@{}> sent a suspicious message `{}`\nPlease manually inspect the URL. If it is bad, ban the user.",
                                 msg.author.id,
                                 msg.content_safe(ctx)
                             ))
                     })
                     .allowed_mentions(|m| m.roles(vec![RoleId(mod_tatoe_role)]))
+                    .components(|c| {
+                        c.create_action_row(|r| {
+                            r.create_button(|b| {
+                                b.style(ButtonStyle::Primary)
+                                    .custom_id("unmute")
+                                    .label("Unmute")
+                                    .emoji('😇')
+                                    .style(ButtonStyle::Success)
+                            })
+                            .create_button(|b| {
+                                b.label("Ban")
+                                    .custom_id("ban")
+                                    .emoji('🔨')
+                                    .style(ButtonStyle::Danger)
+                            })
+                        })
+                    })
             })
-            .await;
-        if let Some(guild) = msg.guild(ctx) {
-            let mut member = guild.member(ctx, msg.author.id).await?;
-            member.add_role(ctx, RoleId(536242137948487710)).await?;
-            log::info!("muted user {}", msg.author.name);
-            tokio::time::sleep(Duration::from_secs(60 * 5)).await;
-            member.remove_role(ctx, RoleId(536242137948487710)).await?;
+            .await?;
+        // Now see what the user clicked.
+        if let Some(component) = mod_message
+            .await_component_interaction(ctx)
+            .timeout(Duration::from_secs(60 * 10))
+            .await
+        {
+            let user = &component.user;
+            let result = if component.data.custom_id == "ban" {
+                member
+                    .ban_with_reason(ctx, 3, "Sending phishing links")
+                    .await?;
+                "banned"
+            } else if component.data.custom_id == "unmute" {
+                info!(
+                    "unmuted user {} after moderator {} reviewed case",
+                    member, user
+                );
+                member.remove_role(ctx, muted_role).await?;
+                "unmuted"
+            } else {
+                error!("Invalid response type sent");
+                component
+                    .create_interaction_response(ctx, |r| {
+                        r.kind(InteractionResponseType::UpdateMessage)
+                            .interaction_response_data(|d| d.content("Invalid response type sent"))
+                    })
+                    .await?;
+                return Ok(());
+            };
+            let text = format!("{} {} {}", user, result, member);
+            let mut embed = CreateEmbed::default();
+            embed.title("Phishing Log").description(text).color(Color::DARK_GREEN);
+            let embeds = vec![embed];
+            component
+                .create_interaction_response(ctx, |r| {
+                    r.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|f| f
+                        .set_components(CreateComponents::default())
+                        .content("Problem solved!")
+                        // awkwardly overwrite the embed
+                        .embeds(embeds))
+                })
+                .await?;
         } else {
-            log::error!("Failed to mute user");
+            info!("Timed out, and unmuting the user");
+            mod_message.reply(ctx, "Timed out, unmuting user?").await?;
+            member.remove_role(ctx, muted_role).await?;
         }
     }
     Ok(())
@@ -99,7 +165,11 @@ async fn listener(
 ) -> Result<(), Error> {
     log::info!("event: {:?}", event);
     if let Event::Message { new_message } = event {
-        message(ctx, event, data, new_message).await?
+        if let Err(e) = message(ctx, event, data, new_message).await {
+            let mod_channel = ChannelId(dotenv::var("MOD_CHANNEL")?.parse()?);
+            mod_channel.send_message(ctx, |m| m.content(format!("Something went bad! {:?}", e))).await?;
+            error!("Encountered error banning user {:?}", e);
+        }
     };
 
     Ok(())
@@ -109,12 +179,14 @@ async fn listener(
 async fn main() {
     pretty_env_logger::init();
     poise::Framework::build()
-        .prefix("~")
         .token(dotenv::var("DISCORD_BOT_TOKEN").unwrap())
         .user_data_setup(move |_ctx, _ready, _framework| Box::pin(async move { Ok(PotatoData {}) }))
         .options(poise::FrameworkOptions {
             listener: |ctx, event, _framework, data| Box::pin(listener(ctx, event, data)),
-
+            prefix_options: PrefixFrameworkOptions {
+                prefix: Some("~".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
         })
         .run()
@@ -147,6 +219,7 @@ mod tests {
             check_is_phishing_link("hey pearl i'd like you to sign my autograph for a gift for a friend on discord.com"),
             false
         );
+        assert_eq!(check_is_phishing_link("hey check out my spotify free https://spotify.com"), false);
         // real example, slightly modified
         assert_eq!(
             check_is_phishing_link(
