@@ -21,6 +21,29 @@ lazy_static! {
 type Data = PotatoData;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+async fn is_allow_listed(ctx: &serenity::Context, msg: &Message) -> bool {
+    let allowed_roles = [
+        RoleId(410339329202847744),
+        RoleId(443068255511248896),
+        RoleId(868914982652375091),
+    ];
+    for role in allowed_roles {
+        let guild_id = match msg.guild_id {
+            Some(guild) => guild,
+            None => continue,
+        };
+        if msg
+            .author
+            .has_role(ctx, guild_id, role)
+            .await
+            .unwrap_or_default()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Checks if the link looks like a phishing link. returns true if phishing link
 fn check_is_phishing_link(msg: &str) -> bool {
     // Filters all non discord.gift, .gift TLD's
@@ -60,7 +83,7 @@ async fn message(
     _data: &Data,
     msg: &Message,
 ) -> Result<(), Error> {
-    if check_is_phishing_link(&msg.content) {
+    if check_is_phishing_link(&msg.content) && !is_allow_listed(ctx, msg).await {
         msg.delete(ctx).await?;
         let mod_channel = ChannelId(dotenv::var("MOD_CHANNEL")?.parse()?);
         let mod_tatoe_role = dotenv::var("MOD_ROLE")?.parse()?;
