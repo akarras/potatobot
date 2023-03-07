@@ -1,9 +1,10 @@
 use lazy_static::lazy_static;
-use log::{error, info, debug};
-use poise::serenity::model::id::{ChannelId, RoleId};
-use poise::serenity::model::interactions::message_component::ButtonStyle;
-use poise::serenity::utils::Color;
-use poise::serenity_prelude::{InteractionResponseType, Message, CreateComponents, CreateEmbed};
+use levenshtein::levenshtein;
+use log::{debug, error, info};
+use poise::serenity_prelude::model::application::component::ButtonStyle;
+use poise::serenity_prelude::model::id::{ChannelId, RoleId};
+use poise::serenity_prelude::utils::Color;
+use poise::serenity_prelude::{CreateComponents, CreateEmbed, InteractionResponseType, Message};
 use poise::{serenity_prelude as serenity, Event, PrefixFrameworkOptions};
 use regex::Regex;
 use tokio::time::Duration;
@@ -36,7 +37,7 @@ fn check_is_phishing_link(msg: &str) -> bool {
     if let Some(cap) = ANY_URL_REGEX.captures(msg) {
         println!("{:?}", cap);
         if let Some(domain) = cap.get(2) {
-            let distance = levenshtein_rs::compute(domain.as_str(), "discord");
+            let distance = levenshtein(domain.as_str(), "discord");
             if distance < 4 && distance > 0 {
                 return true;
             } else {
@@ -138,15 +139,19 @@ async fn message(
             };
             let text = format!("{} {} {}", user, result, member);
             let mut embed = CreateEmbed::default();
-            embed.title("Phishing Log").description(text).color(Color::DARK_GREEN);
-            let embeds = vec![embed];
+            embed
+                .title("Phishing Log")
+                .description(text)
+                .color(Color::DARK_GREEN);
+
             component
                 .create_interaction_response(ctx, |r| {
-                    r.kind(InteractionResponseType::UpdateMessage).interaction_response_data(|f| f
-                        .set_components(CreateComponents::default())
-                        .content("Problem solved!")
-                        // awkwardly overwrite the embed
-                        .embeds(embeds))
+                    r.kind(InteractionResponseType::UpdateMessage)
+                        .interaction_response_data(|f| {
+                            f.set_components(CreateComponents::default())
+                                .content("Problem solved!")
+                                .set_embed(embed)
+                        })
                 })
                 .await?;
         } else {
@@ -167,7 +172,9 @@ async fn listener(
     if let Event::Message { new_message } = event {
         if let Err(e) = message(ctx, event, data, new_message).await {
             let mod_channel = ChannelId(dotenv::var("MOD_CHANNEL")?.parse()?);
-            mod_channel.send_message(ctx, |m| m.content(format!("Something went bad! {:?}", e))).await?;
+            mod_channel
+                .send_message(ctx, |m| m.content(format!("Something went bad! {:?}", e)))
+                .await?;
             error!("Encountered error banning user {:?}", e);
         }
     };
@@ -178,11 +185,11 @@ async fn listener(
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     pretty_env_logger::init();
-    poise::Framework::build()
+    poise::Framework::builder()
         .token(dotenv::var("DISCORD_BOT_TOKEN").unwrap())
-        .user_data_setup(move |_ctx, _ready, _framework| Box::pin(async move { Ok(PotatoData {}) }))
+        .setup(move |_ctx, _ready, _framework| Box::pin(async move { Ok(PotatoData {}) }))
         .options(poise::FrameworkOptions {
-            listener: |ctx, event, _framework, data| Box::pin(listener(ctx, event, data)),
+            event_handler: |ctx, event, _framework, data| Box::pin(listener(ctx, event, data)),
             prefix_options: PrefixFrameworkOptions {
                 prefix: Some("~".to_string()),
                 ..Default::default()
@@ -219,7 +226,10 @@ mod tests {
             check_is_phishing_link("hey pearl i'd like you to sign my autograph for a gift for a friend on discord.com"),
             false
         );
-        assert_eq!(check_is_phishing_link("hey check out my spotify free https://spotify.com"), false);
+        assert_eq!(
+            check_is_phishing_link("hey check out my spotify free https://spotify.com"),
+            false
+        );
         // real example, slightly modified
         assert_eq!(
             check_is_phishing_link(
