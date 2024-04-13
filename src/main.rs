@@ -1,11 +1,12 @@
 use lazy_static::lazy_static;
 use levenshtein::levenshtein;
 use log::{debug, error, info};
-use poise::serenity_prelude::model::application::component::ButtonStyle;
 use poise::serenity_prelude::model::id::{ChannelId, RoleId};
-use poise::serenity_prelude::utils::Color;
-use poise::serenity_prelude::{CreateComponents, CreateEmbed, InteractionResponseType, Message};
-use poise::{serenity_prelude as serenity, Event, PrefixFrameworkOptions};
+use poise::serenity_prelude::{
+    ButtonStyle, Color, CreateActionRow, CreateAllowedMentions, CreateButton, CreateEmbed,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, FullEvent, Message,
+};
+use poise::{serenity_prelude as serenity, PrefixFrameworkOptions};
 use regex::Regex;
 use tokio::time::Duration;
 
@@ -23,9 +24,9 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 async fn is_allow_listed(ctx: &serenity::Context, msg: &Message) -> bool {
     let allowed_roles = [
-        RoleId(410339329202847744),
-        RoleId(443068255511248896),
-        RoleId(868914982652375091),
+        RoleId::new(410339329202847744),
+        RoleId::new(443068255511248896),
+        RoleId::new(868914982652375091),
     ];
     for role in allowed_roles {
         let guild_id = match msg.guild_id {
@@ -77,60 +78,50 @@ fn check_is_phishing_link(msg: &str) -> bool {
     false
 }
 
+async fn check_nsfw(file: &Message) -> bool {
+    false
+}
+
 async fn message(
     ctx: &serenity::Context,
-    _event: &poise::Event<'_>,
+    _event: &FullEvent,
     _data: &Data,
     msg: &Message,
 ) -> Result<(), Error> {
     if check_is_phishing_link(&msg.content) && !is_allow_listed(ctx, msg).await {
         msg.delete(ctx).await?;
-        let mod_channel = ChannelId(dotenv::var("MOD_CHANNEL")?.parse()?);
+        let mod_channel = ChannelId::new(dotenv::var("MOD_CHANNEL")?.parse()?);
         let mod_tatoe_role = dotenv::var("MOD_ROLE")?.parse()?;
-        let muted_role = RoleId(dotenv::var("MUTED_ROLE")?.parse()?);
-        let mut member = if let Some(guild) = msg.guild(ctx) {
-            let mut member = guild.member(ctx, msg.author.id).await?;
-            member.add_role(ctx, muted_role).await?;
-            info!("muted user {}", msg.author.name);
-            member
-        } else {
-            error!("Failed to mute user");
-            return Ok(());
-        };
-
-        let mod_message = mod_channel
-            .send_message(ctx, |warn_msg| {
-                warn_msg
-                    .content(format!("<@&{}>", mod_tatoe_role))
-                    .embed(|e| {
-                        e.color(Color::RED)
-                            .title("Potential phishing")
-                            .description(format!(
-                                "<@{}> sent a suspicious message `{}`\nPlease manually inspect the URL. If it is bad, ban the user.",
-                                msg.author.id,
-                                msg.content_safe(ctx)
-                            ))
-                    })
-                    .allowed_mentions(|m| m.roles(vec![RoleId(mod_tatoe_role)]))
-                    .components(|c| {
-                        c.create_action_row(|r| {
-                            r.create_button(|b| {
-                                b.style(ButtonStyle::Primary)
-                                    .custom_id("unmute")
-                                    .label("Unmute")
-                                    .emoji('😇')
-                                    .style(ButtonStyle::Success)
-                            })
-                            .create_button(|b| {
-                                b.label("Ban")
-                                    .custom_id("ban")
-                                    .emoji('🔨')
-                                    .style(ButtonStyle::Danger)
-                            })
-                        })
-                    })
-            })
-            .await?;
+        let muted_role = RoleId::new(dotenv::var("MUTED_ROLE")?.parse()?);
+        let guild = msg
+            .guild(&ctx.cache)
+            .ok_or(anyhow::anyhow!("Guild not in cache"))?.clone();
+        let val = guild.member(ctx, msg.author.id).await;
+        let member = val?.clone();
+        member.add_role(ctx, muted_role).await?;
+        let e = CreateEmbed::new().color(Color::RED)
+        .title("Potential phishing")
+        .description(format!(
+            "<@{}> sent a suspicious message `{}`\nPlease manually inspect the URL. If it is bad, ban the user.",
+            msg.author.id,
+            msg.content_safe(ctx)
+        ));
+        let c = vec![CreateActionRow::Buttons(vec![
+            CreateButton::new("unmute")
+                .label("Unmute")
+                .emoji('😇')
+                .style(ButtonStyle::Success),
+            CreateButton::new("ban")
+                .label("Ban")
+                .emoji('🔨')
+                .style(ButtonStyle::Danger),
+        ])];
+        let msg = CreateMessage::new()
+            .content(format!("<@&{}>", mod_tatoe_role))
+            .embed(e)
+            .allowed_mentions(CreateAllowedMentions::new().roles([RoleId::new(mod_tatoe_role)]))
+            .components(c);
+        let mod_message = mod_channel.send_message(ctx, msg).await?;
         // Now see what the user clicked.
         if let Some(component) = mod_message
             .await_component_interaction(ctx)
@@ -152,30 +143,28 @@ async fn message(
                 "unmuted"
             } else {
                 error!("Invalid response type sent");
-                component
-                    .create_interaction_response(ctx, |r| {
-                        r.kind(InteractionResponseType::UpdateMessage)
-                            .interaction_response_data(|d| d.content("Invalid response type sent"))
-                    })
-                    .await?;
+                let msg = CreateInteractionResponse::UpdateMessage(
+                    CreateInteractionResponseMessage::new().content("Invalid response sent"),
+                );
+                component.create_response(ctx, msg).await?;
                 return Ok(());
             };
+
             let text = format!("{} {} {}", user, result, member);
-            let mut embed = CreateEmbed::default();
-            embed
+            let embed = CreateEmbed::default()
                 .title("Phishing Log")
                 .description(text)
                 .color(Color::DARK_GREEN);
-
             component
-                .create_interaction_response(ctx, |r| {
-                    r.kind(InteractionResponseType::UpdateMessage)
-                        .interaction_response_data(|f| {
-                            f.set_components(CreateComponents::default())
-                                .content("Problem solved!")
-                                .set_embed(embed)
-                        })
-                })
+                .create_response(
+                    ctx,
+                    CreateInteractionResponse::UpdateMessage(
+                        CreateInteractionResponseMessage::new()
+                            .components(vec![])
+                            .content("Problem solved")
+                            .embed(embed),
+                    ),
+                )
                 .await?;
         } else {
             info!("Timed out, and unmuting the user");
@@ -186,17 +175,16 @@ async fn message(
     Ok(())
 }
 
-async fn listener(
-    ctx: &serenity::Context,
-    event: &poise::Event<'_>,
-    data: &Data,
-) -> Result<(), Error> {
+async fn listener(ctx: &serenity::Context, event: &FullEvent, data: &Data) -> Result<(), Error> {
     log::info!("event: {:?}", event);
-    if let Event::Message { new_message } = event {
+    if let FullEvent::Message { new_message } = event {
         if let Err(e) = message(ctx, event, data, new_message).await {
-            let mod_channel = ChannelId(dotenv::var("MOD_CHANNEL")?.parse()?);
+            let mod_channel = ChannelId::new(dotenv::var("MOD_CHANNEL")?.parse()?);
             mod_channel
-                .send_message(ctx, |m| m.content(format!("Something went bad! {:?}", e)))
+                .send_message(
+                    ctx,
+                    CreateMessage::new().content(format!("Something went bad! {:?}", e)),
+                )
                 .await?;
             error!("Encountered error banning user {:?}", e);
         }
@@ -208,8 +196,10 @@ async fn listener(
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     pretty_env_logger::init();
-    poise::Framework::builder()
-        .token(dotenv::var("DISCORD_BOT_TOKEN").unwrap())
+    let token = dotenv::var("DISCORD_BOT_TOKEN").unwrap();
+    let intents = serenity::GatewayIntents::non_privileged();
+
+    let framework = poise::Framework::builder()
         .setup(move |_ctx, _ready, _framework| Box::pin(async move { Ok(PotatoData {}) }))
         .options(poise::FrameworkOptions {
             event_handler: |ctx, event, _framework, data| Box::pin(listener(ctx, event, data)),
@@ -219,9 +209,11 @@ async fn main() {
             },
             ..Default::default()
         })
-        .run()
-        .await
-        .unwrap();
+        .build();
+    let client = serenity::ClientBuilder::new(token, intents)
+        .framework(framework)
+        .await;
+    client.unwrap().start().await.unwrap();
 }
 
 #[cfg(test)]
