@@ -7,6 +7,7 @@ edition = "2018"
 
 [dependencies]
 poise = {version = "0.6.1", features = ["collector"]}
+serenity = {version = "0.12", features = ["cache"]}
 tokio = {version = "1.37.0", features = ["rt-multi-thread"]}
 regex = "1.5.4"
 dotenv = "0.15.0"
@@ -15,5 +16,11 @@ pretty_env_logger = "0.4.0"
 lazy_static = "1.4.0"
 levenshtein = "1.0.5"
 futures = "0.3"
-nsfw = {git = "https://github.com/Fyko/nsfw"}
+nsfw = {git = "https://github.com/Fyko/nsfw", features = ["jpeg"]}
+image = { version = "0.24.7", features = ["jpeg", "webp", "png"] }
 anyhow = "1"
+reqwest = "0.12"
+bytes = {version = "1", features = ["std"]}
+
+[patch.crates-io]
+serenity = {git = "https://github.com/serenity-rs/serenity.git"}

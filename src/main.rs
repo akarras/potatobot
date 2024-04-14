@@ -1,16 +1,26 @@
+use std::io::{Cursor, Read};
+
+use bytes::Buf;
+use image::io::Reader;
+use image::DynamicImage;
 use lazy_static::lazy_static;
 use levenshtein::levenshtein;
 use log::{debug, error, info};
+use nsfw::model::Metric;
+use nsfw::{create_model, examine, Model};
 use poise::serenity_prelude::model::id::{ChannelId, RoleId};
 use poise::serenity_prelude::{
     ButtonStyle, Color, CreateActionRow, CreateAllowedMentions, CreateButton, CreateEmbed,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, FullEvent, Message,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, FullEvent,
+    GatewayIntents, Message,
 };
 use poise::{serenity_prelude as serenity, PrefixFrameworkOptions};
 use regex::Regex;
 use tokio::time::Duration;
 
-pub struct PotatoData {}
+pub struct PotatoData {
+    image_checker: ImageChecker,
+}
 lazy_static! {
     static ref DISCORD_URL_REGEX: Regex = Regex::new(r#"(https|http)://(\S*)\.gift"#).unwrap();
     // incredibly naive url regex that checks for the presence of the words discord or nitro
@@ -78,24 +88,47 @@ fn check_is_phishing_link(msg: &str) -> bool {
     false
 }
 
-async fn check_nsfw(file: &Message) -> bool {
-    false
+async fn is_nsfw(file: &Message, data: &Data) -> bool {
+    info!("checking {file:?}");
+    // let image_urls = file.attachments.iter().map(|attachment| {
+    //     attachment.content_type.as_ref().map(|content| content.starts_with("image").then(|| attachment.proxy_url.clone()));
+    // });
+    let thumbnails = file
+        .embeds
+        .iter()
+        .filter_map(|e| e.thumbnail.as_ref())
+        .map(|i| i.proxy_url.as_deref().unwrap_or(i.url.as_str()));
+    let values = futures::future::join_all(
+        thumbnails.map(|url| async move { data.image_checker.is_image_nsfw(&url).await }),
+    )
+    .await;
+    // let values = futures::future::join_all(file.attachments.iter().map(|attachment| async move {
+    //     if let Some(true) = attachment.content_type.as_ref().map(|content| content.starts_with("image")) {
+    //         data.image_checker.is_url_nsfw(&attachment.proxy_url).await.unwrap_or_default()
+    //     } else {
+    //         false
+    //     }
+    // })).await;
+    values.into_iter().any(|a| a.unwrap_or_default())
 }
 
-async fn message(
+async fn check_message(
     ctx: &serenity::Context,
     _event: &FullEvent,
-    _data: &Data,
+    data: &Data,
     msg: &Message,
 ) -> Result<(), Error> {
-    if check_is_phishing_link(&msg.content) && !is_allow_listed(ctx, msg).await {
+    if (check_is_phishing_link(&msg.content) || is_nsfw(msg, data).await)
+        && !is_allow_listed(ctx, msg).await
+    {
         msg.delete(ctx).await?;
         let mod_channel = ChannelId::new(dotenv::var("MOD_CHANNEL")?.parse()?);
         let mod_tatoe_role = dotenv::var("MOD_ROLE")?.parse()?;
         let muted_role = RoleId::new(dotenv::var("MUTED_ROLE")?.parse()?);
         let guild = msg
             .guild(&ctx.cache)
-            .ok_or(anyhow::anyhow!("Guild not in cache"))?.clone();
+            .ok_or(anyhow::anyhow!("Guild not in cache"))?
+            .clone();
         let val = guild.member(ctx, msg.author.id).await;
         let member = val?.clone();
         member.add_role(ctx, muted_role).await?;
@@ -176,9 +209,19 @@ async fn message(
 }
 
 async fn listener(ctx: &serenity::Context, event: &FullEvent, data: &Data) -> Result<(), Error> {
-    log::info!("event: {:?}", event);
-    if let FullEvent::Message { new_message } = event {
-        if let Err(e) = message(ctx, event, data, new_message).await {
+    if matches!(
+        event,
+        FullEvent::Message { .. } | FullEvent::MessageUpdate { .. }
+    ) {
+        info!("event: {event:?}");
+    }
+    if let FullEvent::Message { new_message }
+    | FullEvent::MessageUpdate {
+        new: Some(new_message),
+        ..
+    } = event
+    {
+        if let Err(e) = check_message(ctx, event, data, new_message).await {
             let mod_channel = ChannelId::new(dotenv::var("MOD_CHANNEL")?.parse()?);
             mod_channel
                 .send_message(
@@ -189,18 +232,74 @@ async fn listener(ctx: &serenity::Context, event: &FullEvent, data: &Data) -> Re
             error!("Encountered error banning user {:?}", e);
         }
     };
+    if let FullEvent::MessageUpdate { new: None, event: update, .. } = event {
+        if let Ok(msg) = ctx.http.get_message(update.channel_id, update.id).await {
+            if let Err(e) = check_message(ctx, event, data, &msg).await {
+                let mod_channel = ChannelId::new(dotenv::var("MOD_CHANNEL")?.parse()?);
+                mod_channel
+                    .send_message(
+                        ctx,
+                        CreateMessage::new().content(format!("Something went bad! {:?}", e)),
+                    )
+                    .await?;
+                error!("Encountered error banning user {:?}", e);
+            }
+        }
+
+    }
 
     Ok(())
+}
+
+struct ImageChecker {
+    model: Model,
+}
+
+impl ImageChecker {
+    async fn is_image_nsfw(&self, url: &str) -> anyhow::Result<bool> {
+        info!("Checking {url}");
+        let bytes = reqwest::get(url).await?.bytes().await?;
+        let mut image = Vec::new();
+        let _ = bytes.reader().read_to_end(&mut image)?;
+        let image = Cursor::new(image);
+        let reader = Reader::new(image).with_guessed_format()?;
+        let image = reader.decode()?;
+        let buffer = image.to_rgba8();
+        let values = examine(&self.model, &buffer)
+            .map_err(|e| anyhow::anyhow!("Failed to classify nsfw: {e}"))?;
+        info!("{values:?}");
+        let value = values.into_iter().any(|c| {
+            if c.metric != Metric::Neutral {
+                c.score >= 0.001
+            } else {
+                false
+            }
+        });
+        Ok(value)
+        // examine(&model, image)
+    }
+    
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     pretty_env_logger::init();
     let token = dotenv::var("DISCORD_BOT_TOKEN").unwrap();
-    let intents = serenity::GatewayIntents::non_privileged();
+    let intents = serenity::GatewayIntents::all();
+
+    let bytes = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/model.onnx"));
+    let bytes = Cursor::new(bytes);
+    let model = create_model(bytes).expect("ML Model to load");
+    info!("Initialized machine learning");
 
     let framework = poise::Framework::builder()
-        .setup(move |_ctx, _ready, _framework| Box::pin(async move { Ok(PotatoData {}) }))
+        .setup(move |_ctx, _ready, _framework| {
+            Box::pin(async move {
+                Ok(PotatoData {
+                    image_checker: ImageChecker { model },
+                })
+            })
+        })
         .options(poise::FrameworkOptions {
             event_handler: |ctx, event, _framework, data| Box::pin(listener(ctx, event, data)),
             prefix_options: PrefixFrameworkOptions {
