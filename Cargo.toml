@@ -19,7 +19,7 @@ futures = "0.3"
 nsfw = {git = "https://github.com/Fyko/nsfw", features = ["jpeg", "gif"]}
 image = { version = "0.24.7", features = ["jpeg", "webp", "png", "gif"] }
 anyhow = "1"
-reqwest = "0.12"
+reqwest = {version = "0.12", default-features = false, features = ["rustls-tls"]}
 bytes = {version = "1", features = ["std"]}
 rayon = "1"
 ffmpeg-next = {version = "7.0.0"}
