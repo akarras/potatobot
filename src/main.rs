@@ -64,7 +64,16 @@ fn check_is_phishing_link(msg: &str) -> bool {
         // rust regex crate doesn't support negative look behind, instead check that the 2rd capture group in the regex matches discord.gift, if so then it's okay
         if let Some(domain) = cap.get(2) {
             // just discord means it's a valid url with the .gift appended
-            return !(domain.as_str() == "discord");
+            if domain.as_str() == "discord" {
+                let lower_case = msg.to_lowercase();
+                let invalid_terms = ["onlyfans", "only", "porn", "leak", "nsfw", "nude", "xxx", "girl", "sex"];
+                // shift towards only fans filtering
+                for term in invalid_terms {
+                    return lower_case.contains(&term);
+                }
+                // going to assume this link is okay as long as there aren't any invalid terms around it
+                return false;
+            }
         } else {
             // this shouldn't ever happen, but just in case return true
             error!("invalid match index {:?}", cap);
