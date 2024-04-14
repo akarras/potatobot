@@ -1,8 +1,10 @@
 use std::io::{Cursor, Read};
+use std::time::Instant;
 
 use bytes::Buf;
+use image::codecs::gif::GifDecoder;
 use image::io::Reader;
-use image::DynamicImage;
+use image::AnimationDecoder;
 use lazy_static::lazy_static;
 use levenshtein::levenshtein;
 use log::{debug, error, info};
@@ -11,10 +13,10 @@ use nsfw::{create_model, examine, Model};
 use poise::serenity_prelude::model::id::{ChannelId, RoleId};
 use poise::serenity_prelude::{
     ButtonStyle, Color, CreateActionRow, CreateAllowedMentions, CreateButton, CreateEmbed,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, FullEvent,
-    GatewayIntents, Message,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, FullEvent, Message,
 };
 use poise::{serenity_prelude as serenity, PrefixFrameworkOptions};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use regex::Regex;
 use tokio::time::Duration;
 
@@ -89,7 +91,7 @@ fn check_is_phishing_link(msg: &str) -> bool {
 }
 
 async fn is_nsfw(file: &Message, data: &Data) -> bool {
-    info!("checking {file:?}");
+    // info!("checking {file:?}");
     // let image_urls = file.attachments.iter().map(|attachment| {
     //     attachment.content_type.as_ref().map(|content| content.starts_with("image").then(|| attachment.proxy_url.clone()));
     // });
@@ -98,9 +100,27 @@ async fn is_nsfw(file: &Message, data: &Data) -> bool {
         .iter()
         .filter_map(|e| e.thumbnail.as_ref())
         .map(|i| i.proxy_url.as_deref().unwrap_or(i.url.as_str()));
-    let values = futures::future::join_all(
-        thumbnails.map(|url| async move { data.image_checker.is_image_nsfw(&url).await }),
+    let gifs = futures::future::join_all(
+        file.attachments
+            .iter()
+            .filter(|a| {
+                a.content_type
+                    .as_ref()
+                    .map(|content| content.eq("image/gif"))
+                    .unwrap_or_default()
+            })
+            .map(|a| a.proxy_url.as_str())
+            .map(|a| async move { data.image_checker.is_gif_nsfw(a).await }),
     )
+    .await;
+
+    let values = futures::future::join_all(thumbnails.map(|url| async move {
+        if url.ends_with(".gif") {
+            data.image_checker.is_gif_nsfw(&url).await
+        } else {
+            data.image_checker.is_image_nsfw(&url).await
+        }
+    }))
     .await;
     // let values = futures::future::join_all(file.attachments.iter().map(|attachment| async move {
     //     if let Some(true) = attachment.content_type.as_ref().map(|content| content.starts_with("image")) {
@@ -109,7 +129,10 @@ async fn is_nsfw(file: &Message, data: &Data) -> bool {
     //         false
     //     }
     // })).await;
-    values.into_iter().any(|a| a.unwrap_or_default())
+    values
+        .into_iter()
+        .chain(gifs.into_iter())
+        .any(|a| a.unwrap_or_default())
 }
 
 async fn check_message(
@@ -232,7 +255,12 @@ async fn listener(ctx: &serenity::Context, event: &FullEvent, data: &Data) -> Re
             error!("Encountered error banning user {:?}", e);
         }
     };
-    if let FullEvent::MessageUpdate { new: None, event: update, .. } = event {
+    if let FullEvent::MessageUpdate {
+        new: None,
+        event: update,
+        ..
+    } = event
+    {
         if let Ok(msg) = ctx.http.get_message(update.channel_id, update.id).await {
             if let Err(e) = check_message(ctx, event, data, &msg).await {
                 let mod_channel = ChannelId::new(dotenv::var("MOD_CHANNEL")?.parse()?);
@@ -245,7 +273,6 @@ async fn listener(ctx: &serenity::Context, event: &FullEvent, data: &Data) -> Re
                 error!("Encountered error banning user {:?}", e);
             }
         }
-
     }
 
     Ok(())
@@ -269,8 +296,8 @@ impl ImageChecker {
             .map_err(|e| anyhow::anyhow!("Failed to classify nsfw: {e}"))?;
         info!("{values:?}");
         let value = values.into_iter().any(|c| {
-            if c.metric != Metric::Neutral {
-                c.score >= 0.001
+            if !matches!(c.metric, Metric::Neutral | Metric::Drawings) {
+                c.score >= 0.4
             } else {
                 false
             }
@@ -278,7 +305,39 @@ impl ImageChecker {
         Ok(value)
         // examine(&model, image)
     }
-    
+
+    async fn is_gif_nsfw(&self, url: &str) -> anyhow::Result<bool> {
+        let bytes = reqwest::get(url).await?.bytes().await?;
+        let mut image = Vec::new();
+        let _ = bytes.reader().read_to_end(&mut image)?;
+        let start = Instant::now();
+        let image = Cursor::new(image);
+        let gif = GifDecoder::new(image)?;
+        let frames = gif.into_frames().collect_frames()?;
+        let is_nsfw = frames
+            .into_par_iter()
+            .map(|frame| {
+                examine(&self.model, &frame.into_buffer()).map_err(|e| anyhow::anyhow!("{e}"))
+            })
+            .flatten()
+            .any(|ac| {
+                ac.into_iter().any(|c| {
+                    if !matches!(c.metric, Metric::Drawings | Metric::Neutral) {
+                        if c.score >= 0.4 {
+                            info!("{c:?}");
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                })
+            });
+        let elapsed = Instant::now() - start;
+        info!("Processed gif in : {} ms", elapsed.as_millis());
+        Ok(is_nsfw)
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]

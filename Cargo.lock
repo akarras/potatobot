@@ -1746,6 +1746,7 @@ dependencies = [
  "nsfw",
  "poise",
  "pretty_env_logger",
+ "rayon",
  "regex",
  "reqwest 0.12.3",
  "serenity",

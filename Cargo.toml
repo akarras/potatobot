@@ -16,11 +16,12 @@ pretty_env_logger = "0.4.0"
 lazy_static = "1.4.0"
 levenshtein = "1.0.5"
 futures = "0.3"
-nsfw = {git = "https://github.com/Fyko/nsfw", features = ["jpeg"]}
-image = { version = "0.24.7", features = ["jpeg", "webp", "png"] }
+nsfw = {git = "https://github.com/Fyko/nsfw", features = ["jpeg", "gif"]}
+image = { version = "0.24.7", features = ["jpeg", "webp", "png", "gif"] }
 anyhow = "1"
 reqwest = "0.12"
 bytes = {version = "1", features = ["std"]}
+rayon = "1"
 
 [patch.crates-io]
 serenity = {git = "https://github.com/serenity-rs/serenity.git"}
