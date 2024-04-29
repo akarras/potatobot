@@ -87,7 +87,7 @@ lazy_static! {
 type Data = PotatoData;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-async fn is_allow_listed(ctx: &serenity::Context, author: &Member, data: &PotatoData) -> bool {
+async fn is_allow_listed(author: &Member, data: &PotatoData) -> bool {
     if author.user.bot {
         return true;
     }
@@ -142,7 +142,7 @@ fn check_is_phishing_link(msg: &str) -> Option<SpamReason> {
     }
     if let Some(cap) = DISCORD_GIFT_REGEX.captures(msg) {
         // rust regex crate doesn't support negative look behind, instead check that the 2rd capture group in the regex matches discord.gift, if so then it's okay
-        if let Some(domain) = cap.get(2) {
+        if let Some(_domain) = cap.get(2) {
             // just discord means it's a valid url with the .gift appended
             return Some(SpamReason::Phishing);
         } else {
@@ -262,7 +262,7 @@ async fn check_message(
         return Ok(());
     }
     let member = msg.member(ctx).await?;
-    if is_allow_listed(ctx, &member, data).await {
+    if is_allow_listed(&member, data).await {
         return Ok(());
     }
     if let Some(reject) = check_is_phishing_link(&msg.content)
@@ -414,6 +414,8 @@ fn get_video_frames_as_stream(url: String) -> Receiver<DynamicImage> {
             .streams()
             .best(Type::Video)
             .ok_or(ffmpeg_next::Error::StreamNotFound)?;
+        let sample_count = 500;
+        let n_frames = (input.frames() / sample_count).max(1);
         let video_stream_index = input.index();
 
         let context_decoder = ffmpeg_next::codec::Context::from_parameters(input.parameters())?;
@@ -442,13 +444,15 @@ fn get_video_frames_as_stream(url: String) -> Receiver<DynamicImage> {
                     //     decoded.format(),
                     //     rgb_frame.format()
                     // );
-                    let data = rgb_frame.data(0);
-                    // let data = transpose(decoder.width() as usize, decoder.height() as usize, data);
-                    let image =
-                        RgbaImage::from_vec(rgb_frame.width(), rgb_frame.height(), data.to_vec())
-                            .unwrap();
-                    let image = DynamicImage::from(image);
-                    sender.blocking_send(image)?;
+                    if frame_index % n_frames == 1 {
+                        let data = rgb_frame.data(0);
+                        // let data = transpose(decoder.width() as usize, decoder.height() as usize, data);
+                        let image =
+                            RgbaImage::from_vec(rgb_frame.width(), rgb_frame.height(), data.to_vec())
+                                .unwrap();
+                        let image = DynamicImage::from(image);
+                        sender.blocking_send(image)?;
+                    }
 
                     // save_file(&rgb_frame, frame_index).unwrap();
                     frame_index += 1;
