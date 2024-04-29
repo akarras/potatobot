@@ -444,7 +444,8 @@ fn get_video_frames_as_stream(url: String) -> Receiver<DynamicImage> {
                     //     decoded.format(),
                     //     rgb_frame.format()
                     // );
-                    if frame_index % n_frames == 1 {
+                    // info!("{frame_index} {n_frames} {}", frame_index % n_frames);
+                    if frame_index % n_frames == 0 {
                         let data = rgb_frame.data(0);
                         // let data = transpose(decoder.width() as usize, decoder.height() as usize, data);
                         let image =
