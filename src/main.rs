@@ -4,7 +4,7 @@ use std::io::{Cursor, Read, Write};
 use std::sync::RwLock;
 use std::time::Instant;
 
-use ::serenity::all::{GatewayIntents, UserId};
+use ::serenity::all::{GatewayIntents, Member, UserId};
 use bytes::Buf;
 use chrono::{DateTime, Utc};
 use ffmpeg::frame::Video;
@@ -29,7 +29,7 @@ use poise::serenity_prelude::{
 use poise::{serenity_prelude as serenity, PrefixFrameworkOptions};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::spawn_blocking;
 use tokio::time::Duration;
 
@@ -88,33 +88,27 @@ lazy_static! {
 type Data = PotatoData;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-async fn is_allow_listed(ctx: &serenity::Context, msg: &Message, data: &PotatoData) -> bool {
-    if msg.author.bot {
+async fn is_allow_listed(ctx: &serenity::Context, author: &Member, data: &PotatoData) -> bool {
+    if author.user.bot {
         return true;
     }
+    
+    
     let allowed_roles = [
         RoleId::new(410339329202847744),
         RoleId::new(443068255511248896),
         RoleId::new(868914982652375091),
     ];
-    for role in allowed_roles {
-        let guild_id = match msg.guild_id {
-            Some(guild) => guild,
-            None => continue,
-        };
-        if msg
-            .author
-            .has_role(ctx, guild_id, role)
-            .await
-            .unwrap_or_default()
-        {
+    for role in &author.roles {
+        if allowed_roles.contains(&role) {
             return true;
         }
     }
+    
     if let Ok(reader) = data.allow_list.read() {
         if let Some((_user, end_time)) = reader
             .iter()
-            .find(|(user, _)| msg.author.id == *user)
+            .find(|(user, _)| author.user.id == *user)
             .copied()
         {
             let now = Utc::now();
@@ -268,7 +262,8 @@ async fn check_message(
     if msg.guild_id.is_none() {
         return Ok(());
     }
-    if is_allow_listed(ctx, msg, data).await {
+    let member = msg.member(ctx).await?;
+    if is_allow_listed(ctx, &member, data).await {
         return Ok(());
     }
     if let Some(reject) = check_is_phishing_link(&msg.content)
@@ -281,8 +276,7 @@ async fn check_message(
         let mod_channel = ChannelId::new(dotenv::var("MOD_CHANNEL")?.parse()?);
         let mod_tatoe_role = dotenv::var("MOD_ROLE")?.parse()?;
         let muted_role = RoleId::new(dotenv::var("MUTED_ROLE")?.parse()?);
-        info!("HELLO?");
-        let member = msg.member(ctx).await?;
+        
         member.add_role(ctx, muted_role).await?;
         let reason = match &reject {
             RejectionReason::SpamReason(spam) => spam.as_str().to_string(),
@@ -301,7 +295,7 @@ async fn check_message(
                 })
             }
         };
-        info!("WAH");
+        
         let e = CreateEmbed::new().color(Color::RED)
         .title(reason)
         .description(format!(
@@ -408,32 +402,14 @@ async fn check_message(
     Ok(())
 }
 
-fn transpose(width: usize, height: usize, bytes: &[u8]) -> Vec<u8> {
-    // assumes RGBA pixel format
-    let mut vec = vec![0; width * height * 4];
-    for y in 0..height {
-        for x in 0..width {
-            // height 500
-            // width 400
-            // 501
-            let src = (x * height) + y;
-            let pixels = &bytes[src..src + 4];
-            let dst = (y * width) + x;
-            if let Some(mut slice) = vec.get_mut(dst..dst + 4) {
-                slice.write(pixels).unwrap();
-            }
-        }
-    }
-    vec
-}
 
 fn nearest_bigger_div_by_8(mut n: u32) -> u32 {
     n += 7;
     return n & !7;
 }
 
-fn get_video_frames_as_stream(url: String) -> UnboundedReceiver<DynamicImage> {
-    let (sender, recv) = tokio::sync::mpsc::unbounded_channel();
+fn get_video_frames_as_stream(url: String) -> Receiver<DynamicImage> {
+    let (sender, recv) = tokio::sync::mpsc::channel(34);
     spawn_blocking(move || {
         let mut ictx = input(&url)?;
         let input = ictx
@@ -474,7 +450,7 @@ fn get_video_frames_as_stream(url: String) -> UnboundedReceiver<DynamicImage> {
                         RgbaImage::from_vec(rgb_frame.width(), rgb_frame.height(), data.to_vec())
                             .unwrap();
                     let image = DynamicImage::from(image);
-                    sender.send(image)?;
+                    sender.blocking_send(image)?;
 
                     // save_file(&rgb_frame, frame_index).unwrap();
                     frame_index += 1;
@@ -497,12 +473,12 @@ fn get_video_frames_as_stream(url: String) -> UnboundedReceiver<DynamicImage> {
     recv
 }
 
-fn save_file(frame: &Video, index: usize) -> std::result::Result<(), std::io::Error> {
-    let mut file = File::create(format!("./images/frame{}.ppm", index))?;
-    file.write_all(format!("P6\n{} {}\n255\n", frame.width(), frame.height()).as_bytes())?;
-    file.write_all(frame.data(0))?;
-    Ok(())
-}
+// fn save_file(frame: &Video, index: usize) -> std::result::Result<(), std::io::Error> {
+//     let mut file = File::create(format!("./images/frame{}.ppm", index))?;
+//     file.write_all(format!("P6\n{} {}\n255\n", frame.width(), frame.height()).as_bytes())?;
+//     file.write_all(frame.data(0))?;
+//     Ok(())
+// }
 
 async fn listener(ctx: &serenity::Context, event: &FullEvent, data: &Data) -> Result<(), Error> {
     // if matches!(
@@ -617,7 +593,7 @@ impl ImageChecker {
             // frame.save(format!("./images/img_{f}.png")).unwrap();
             frames.push(frame.to_rgba8());
             // info!("Checking frame {f} {url}");
-            if stream.len() == 0 {
+            if stream.len() == 0 || frames.len() > 30 {
                 let mut temp: Vec<_> = frames
                     .par_iter()
                     .flat_map(|frame| {
