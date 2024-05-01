@@ -17,7 +17,7 @@ use image::io::Reader;
 use image::{AnimationDecoder, DynamicImage, RgbaImage};
 use lazy_static::lazy_static;
 use levenshtein::levenshtein;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use nsfw::model::{Classification, Metric};
 use nsfw::{create_model, examine, Model};
 use poise::serenity_prelude::model::id::{ChannelId, RoleId};
@@ -261,7 +261,10 @@ async fn check_message(
     if msg.guild_id.is_none() {
         return Ok(());
     }
-    let member = msg.member(ctx).await?;
+    let Ok(member) = msg.member(ctx).await else {
+        warn!("Unable to find a member for message {msg:?}");
+        return Ok(());
+    };
     if is_allow_listed(&member, data).await {
         return Ok(());
     }
