@@ -418,7 +418,9 @@ fn get_video_frames_as_stream(url: String) -> Receiver<DynamicImage> {
             .best(Type::Video)
             .ok_or(ffmpeg_next::Error::StreamNotFound)?;
         let sample_count = 500;
-        let n_frames = (input.frames() / sample_count).max(1);
+        let frames = input.frames();
+        let n_frames = (frames / sample_count).max(1);
+        info!("{n_frames} {sample_count} {:?}", input.avg_frame_rate());
         let video_stream_index = input.index();
 
         let context_decoder = ffmpeg_next::codec::Context::from_parameters(input.parameters())?;
@@ -448,6 +450,7 @@ fn get_video_frames_as_stream(url: String) -> Receiver<DynamicImage> {
                     //     rgb_frame.format()
                     // );
                     // info!("{frame_index} {n_frames} {}", frame_index % n_frames);
+
                     if frame_index % n_frames == 0 {
                         let data = rgb_frame.data(0);
                         // let data = transpose(decoder.width() as usize, decoder.height() as usize, data);
@@ -627,9 +630,9 @@ impl ImageChecker {
                     .copied();
                 let length = results.len();
                 let bad_rate = number_bad as f32 / length as f32;
-                let test_rate = if length < 24 {
+                let test_rate = if length < 10 {
                     0.1
-                } else if length < 100 {
+                } else if length < 25 {
                     0.08
                 } else {
                     0.03
