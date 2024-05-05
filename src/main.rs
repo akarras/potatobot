@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::io::{Cursor, Read};
 use std::sync::RwLock;
 use std::time::Instant;
