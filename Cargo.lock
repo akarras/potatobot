@@ -1692,6 +1692,7 @@ dependencies = [
  "ffmpeg-next",
  "futures",
  "image",
+ "itertools 0.12.1",
  "lazy_static",
  "levenshtein",
  "log",

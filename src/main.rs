@@ -15,6 +15,7 @@ use futures::future::BoxFuture;
 use image::codecs::gif::GifDecoder;
 use image::io::Reader;
 use image::{AnimationDecoder, DynamicImage, RgbaImage};
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use levenshtein::levenshtein;
 use log::{debug, error, info, warn};
@@ -54,7 +55,7 @@ impl SpamReason {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum ImageContent {
     Hentai,
     Porn,
@@ -358,6 +359,7 @@ async fn check_message(
                 if let Ok(mut write) = data.allow_list.write() {
                     write.push((user.id, Utc::now() + chrono::Duration::days(1)));
                 }
+                member.remove_role(ctx, muted_role).await?;
                 let _ = member
                     .user
                     .direct_message(
@@ -454,9 +456,12 @@ fn get_video_frames_as_stream(url: String) -> Receiver<DynamicImage> {
                     if frame_index % n_frames == 0 {
                         let data = rgb_frame.data(0);
                         // let data = transpose(decoder.width() as usize, decoder.height() as usize, data);
-                        let image =
-                            RgbaImage::from_vec(rgb_frame.width(), rgb_frame.height(), data.to_vec())
-                                .unwrap();
+                        let image = RgbaImage::from_vec(
+                            rgb_frame.width(),
+                            rgb_frame.height(),
+                            data.to_vec(),
+                        )
+                        .unwrap();
                         let image = DynamicImage::from(image);
                         sender.blocking_send(image)?;
                     }
@@ -542,6 +547,23 @@ struct ImageChecker {
     model: Model,
 }
 
+fn average_classification(
+    classifications: impl Iterator<Item = impl Iterator<Item = (ImageContent, f32)>>,
+    num_frames: usize,
+) -> Option<(ImageContent, f32)> {
+    let keys = classifications.flatten().into_group_map();
+    info!("{keys:?}");
+    keys.into_iter().find_map(|(key, values)| {
+        let average_value = values.iter().sum::<f32>() / num_frames as f32;
+        info!("{key:?} average {average_value}");
+        if average_value > 0.9 {
+            Some((key, average_value))
+        } else {
+            None
+        }
+    })
+}
+
 impl ImageChecker {
     async fn is_image_nsfw(
         &self,
@@ -574,18 +596,24 @@ impl ImageChecker {
         let start = Instant::now();
         let image = Cursor::new(image);
         let gif = GifDecoder::new(image)?;
-        let is_nsfw = gif
+        let frame_data: Vec<_> = gif
             .into_frames()
             .filter_map(|frame| {
                 examine(model, &frame.ok()?.into_buffer())
                     .map_err(|e| anyhow::anyhow!("{e}"))
                     .ok()
             })
-            .find_map(|classifications| {
+            .map(|classifications| {
                 classifications
                     .into_iter()
-                    .find_map(Self::check_classification)
-            });
+                    .filter_map(Self::check_classification)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let is_nsfw = average_classification(
+            frame_data.iter().map(|i| i.iter().copied()),
+            frame_data.len(),
+        );
 
         let elapsed = Instant::now() - start;
         info!("Processed gif in : {} ms", elapsed.as_millis());
@@ -615,32 +643,21 @@ impl ImageChecker {
                     .flat_map(|frame| {
                         examine(&self.model, &frame).map_err(|e| anyhow::anyhow!("{e}"))
                     })
-                    .map(|classes| classes.into_iter().find_map(Self::check_classification))
+                    .map(|classes| {
+                        classes
+                            .into_iter()
+                            .flat_map(Self::check_classification)
+                            .collect::<Vec<_>>()
+                    })
                     .collect();
                 frames = vec![];
 
                 results.append(&mut temp);
-                let number_bad = results.iter().filter(|r| r.is_some()).count();
-                let highest_classification = results
-                    .iter()
-                    .flatten()
-                    .max_by(|(_a, a_score), (_b, b_score)| {
-                        a_score.partial_cmp(b_score).unwrap_or(Ordering::Equal)
-                    })
-                    .copied();
-                let length = results.len();
-                let bad_rate = number_bad as f32 / length as f32;
-                let test_rate = if length < 10 {
-                    0.1
-                } else if length < 25 {
-                    0.08
-                } else {
-                    0.03
-                };
-                info!("{bad_rate} > {test_rate} {length}");
-                if bad_rate > test_rate {
-                    return Ok(highest_classification.map(|c| (c, url.to_string())));
-                };
+                if let Some((class, value)) =
+                    average_classification(results.iter().map(|i| i.iter().copied()), results.len())
+                {
+                    return Ok(Some(((class, value), url.to_string())));
+                }
             }
             // f += 1;
         }
@@ -651,9 +668,9 @@ impl ImageChecker {
     fn check_classification(c: Classification) -> Option<(ImageContent, f32)> {
         if !matches!(c.metric, Metric::Drawings | Metric::Neutral) {
             let (threshold, label) = match c.metric {
-                Metric::Hentai => (0.75, ImageContent::Hentai),
-                Metric::Porn => (0.8, ImageContent::Porn),
-                Metric::Sexy => (0.8, ImageContent::Sexy),
+                Metric::Hentai => (0.85, ImageContent::Hentai),
+                Metric::Porn => (0.85, ImageContent::Porn),
+                Metric::Sexy => (0.85, ImageContent::Sexy),
                 _ => unreachable!("Match expression above disallows drawings/neutral"),
             };
             if c.score >= threshold {
