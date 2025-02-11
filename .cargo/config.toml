@@ -1,0 +1,9 @@
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Ctarget-cpu=native"]
+
+#[target.aarch64-unknown-linux-gnu]
+#rustflags = ["-Ctarget-cpu=native"]
+
+
+#[unstable]
+#build-std = ["std", "core", "alloc"]
